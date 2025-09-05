@@ -2,10 +2,16 @@
 
 """
 Backup Utility
+- Compresses directories to zip format
+- Proper listing of all backup metadata and history stored in json
+- Default .backup folder
+- May restore any backup older backup
+- Uses incremental backup strategy:
+    - Only backups up new files, does not delete anything
+    - Restores backup files, overwriting existing ones, but without deleting local files not found in the backup chain
 """
 
 import argparse
-import pathlib
 from pathlib import Path
 import shutil
 from  datetime import datetime, timezone as Tz, timedelta
@@ -25,7 +31,7 @@ def setup_logging(verbose=False):
     )
 
 # Raw formatter makes sure module docstring format (new lines in particular) is preserved
-parser = argparse.ArgumentParser(__name__, add_help=True, 
+parser = argparse.ArgumentParser("backup", add_help=True, 
                                  description=__doc__, 
                                  formatter_class=argparse.RawDescriptionHelpFormatter
                                  )
@@ -39,7 +45,6 @@ list_command = subcommands.add_parser("list", help="list backups")
 restore_command = subcommands.add_parser("restore", help="restore backups")
 
 # ----------------------- MAIN COMMAND ------------------------ #
-
 parser.add_argument("-v", "--verbose", action="store_true", help="turn verbose output on")
 parser.add_argument("-o", "--output", default=DEFAULT_OUTOUT_DIR, help=f"set output  directory, default: {DEFAULT_OUTOUT_DIR}")
 
@@ -121,13 +126,14 @@ class Metadata:
         return MetaEntry(data)
     
     def format_backup_list(self):
-        # meta_header_lines = [
-        #     f"Backup Directory: {self._meta_dir}",
-        #     f"Total Backups: {len(self._entries)}",
-        #     ""
-        # ]
+        meta_header = [
+            f"Backup Directory: {self._meta_dir}",
+            f"Total Backups: {len(self._entries)}",
+            ""
+        ]
         if not self._entries:
-            return "No backups found"
+            meta_header.append("No backups found")
+            return "\n".join(meta_header)
         
         # Define column widths
         id_width = 10
@@ -138,7 +144,7 @@ class Metadata:
         header = f"{'BACKUP ID':<{id_width}} {'DIRECTORY':<{dir_width}} {'DATE':<{date_width}}"
         separator = "-" * (id_width + dir_width + date_width + 2)
         
-        lines = [header, separator]
+        lines = meta_header + [header, separator]
         
         # Data rows
         for entry in self._entries:
@@ -197,6 +203,11 @@ if __name__ == "__main__":
     elif args.command == "list":
         metadata = Metadata(output_dir)
         print(metadata.format_backup_list())
+    elif args.command == "restore":
+        pass
+    else:
+        logging.error("Must provide a subcommand")
+        parser.print_usage()
 
 # BUG:
 #   It does work but not incrementally
@@ -205,4 +216,11 @@ if __name__ == "__main__":
 #  TODO
 #   Implement restore
 #   zipfile extractall will overwrite automatically
+
+# To restore we must supply the 8-letter id we can find it with backup list
+# we orchestrate with the restore function
+# We create a function that searches metadata entries for the metaentry with that id and returns timestamp and bak_dir
+
+# we cal the get_bak_chain and filter (in) all backs that have that timestamp or lower
+# the we loop through them extracting to that folder with extractall making sure they overwrite.
 

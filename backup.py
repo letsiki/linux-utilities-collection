@@ -13,8 +13,7 @@ Backup Utility
 
 import argparse
 from pathlib import Path
-import shutil
-from datetime import datetime, timezone as Tz, timedelta
+from datetime import datetime, timezone
 import json
 import time
 import zipfile
@@ -64,7 +63,7 @@ parser.add_argument(
 
 # Positional arguments have their dest equal to their name automatically. Explicitly setting dest will raise error
 create_command.add_argument(
-    "create_dir_path",
+    "create_dir_paths",
     nargs="+",
     help="provide one or  more directories to be backed up",
 )
@@ -76,11 +75,18 @@ restore_command.add_argument(
     help="provide one or  more backup id's to be restored",
 )
 
-# --------------------- RESTORE SUBCOMMAND --------------------- #
-restore_command.add_argument(
+# --------------------- REMOVE SUBCOMMAND --------------------- #
+remove_command.add_argument(
     "rm_bak_ids",
     nargs="+",
     help="provide one or  more backup id's to be removed",
+)
+remove_command.add_argument(
+    "-a",
+    "--all",
+    dest="rm_all",
+    action="store_true",
+    help="remove all backups of the directory",
 )
 # Positional arguments have their dest equal to their name automatically. Explicitly setting dest will raise error
 #
@@ -109,11 +115,19 @@ class MetaEntry:
         return abs(hash(self._timestamp))
 
     def __repr__(self):
-        return f"{self.__class__.__qualname__}(\'{self._path}\', {self._timestamp}, {self._file_count})"
-    
+        return f"{self.__class__.__qualname__}('{self._path}', {self._timestamp}, {self._file_count})"
+
     def __str__(self):
         "String representation of the meta entry. Can be used as a filename"
         return f"{self._path.stem}_{self._timestamp}"
+
+    def __eq__(self, other: object) -> bool:
+        """
+        Not currently  utilized. Was initially build for the rm subcommand
+        """
+        if not isinstance(other, MetaEntry):
+            return NotImplemented
+        return self.id_ == other.id_
 
     def to_dict(self):
         return {
@@ -139,67 +153,70 @@ class Metadata:
         for entry in entries:
             self._entries.append(MetaEntry(entry))
 
-    def get_backup_chain(self, bak_dir: Path):
+    def _get_backup_chain(self, bak_dir: Path):
         # sort all backup entries of a given directory chronologically
-        bak_chain =  sorted(
+        bak_chain = sorted(
             filter(lambda x: getattr(x, "_path") == bak_dir, self._entries),
             key=lambda x: getattr(x, "_timestamp"),
         )
         if bak_chain:
             logging.info(f"got back up chain for dir {bak_dir}")
-            # MetaEntries are nested inside the bakchain list therefore 
+            # MetaEntries are nested inside the bakchain list therefore
             # MetaEntry.__repr__ will be used despite calling the logging module
             # The logging module only affects the higher level element
             logging.info(bak_chain)
         return bak_chain
 
-    def get_last_backup_ts(self, bak_dir: Path) -> int:
-        if bak_chain := self.get_backup_chain(bak_dir):
+    def _get_last_backup_ts(self, bak_dir: Path) -> int:
+        if bak_chain := self._get_backup_chain(bak_dir):
             return getattr(bak_chain[-1], "_timestamp")
         return 0
 
-    def get_all_file_paths(self, bak_dir: Path) -> list[Path]:
+    def _get_all_file_paths(self, bak_dir: Path) -> list[Path]:
         """retrieve all non-dir filepaths from scanning a dir recursively"""
         return [file for file in bak_dir.rglob("*") if file.is_file()]
 
-    def filter_updated_paths(self, bak_dir: Path):
+    def _filter_updated_paths(self, bak_dir: Path):
         """filters in all file paths that are new or updated"""
-        last_ts = self.get_last_backup_ts(bak_dir)
-        current_files = self.get_all_file_paths(bak_dir)
+        last_ts = self._get_last_backup_ts(bak_dir)
+        current_files = self._get_all_file_paths(bak_dir)
         return list(filter(lambda x: x.stat().st_mtime > last_ts, current_files))
 
     @staticmethod
-    def compress(filepaths: list[Path], zip_filepath: Path, bak_dir: Path):
+    def _compress(filepaths: list[Path], zip_filepath: Path, bak_dir: Path):
         with zipfile.ZipFile(zip_filepath, "w", zipfile.ZIP_DEFLATED) as zipf:
             for filepath in filepaths:
                 rel_path = filepath.relative_to(bak_dir)
                 zipf.write(filepath, rel_path)
 
-    def backup(self, bak_dir: Path):
+    def backup(self, bak_dirs: list[Path]):
         """
-        this is our public interface for backing up a folder
-        the function makes sure the folder path is converted to absolute before
+        this is our public interface for backing up  folders
+        the function makes sure each folder path is converted to absolute before
         getting passed to internal functions
         """
-        bak_dir = bak_dir.absolute()
-        files = self.filter_updated_paths(bak_dir)
-        if files:
-            meta_entry = self.create_meta_entry(bak_dir, len(files))
-            self.compress(files, self._meta_dir / (str(meta_entry) + ".zip"), bak_dir)
-            self._entries.append(meta_entry)
-            self._to_json()
-        else:
-            logging.info("No files have been added or updated, exiting")
+        for bak_dir in bak_dirs:
+            bak_dir = Path(bak_dir).absolute()
+            files = self._filter_updated_paths(bak_dir)
+            if files:
+                meta_entry = self._create_meta_entry(bak_dir, len(files))
+                self._compress(
+                    files, self._meta_dir / (str(meta_entry) + ".zip"), bak_dir
+                )
+                self._entries.append(meta_entry)
+                self._to_json()
+            else:
+                logging.info("No files have been added or updated, skipping")
 
     def _to_json(self):
         with open(self._meta_dir / ".meta.json", "w") as f:
             json.dump([meta_entry.to_dict() for meta_entry in self._entries], f)
 
-    def create_meta_entry(self, bak_dir: Path, file_count):
+    def _create_meta_entry(self, bak_dir: Path, file_count):
         data = {"path": bak_dir, "timestamp": time.time(), "file_count": file_count}
         return MetaEntry(data)
 
-    def format_backup_list(self):
+    def format_backup_list(self) -> str:
         meta_header = [
             f"Backup Directory: {self._meta_dir}",
             f"Total Backups: {len(self._entries)}",
@@ -235,57 +252,85 @@ class Metadata:
 
         return "\n".join(lines)
 
-    def get_bak_meta(self, bak_id: str) -> tuple[Path, int] | None:
+    def _get_bak_meta(self, bak_id: str) -> tuple[Path, int] | None:
         for entry in self._entries:
             if getattr(entry, "id_") == bak_id:
                 return (getattr(entry, "_path"), getattr(entry, "_timestamp"))
 
-    def extract(self, entry: MetaEntry):
+    def _extract(self, entry: MetaEntry):
         with zipfile.ZipFile(self._meta_dir / (str(entry) + ".zip"), "r") as zipf:
             zipf.extractall(getattr(entry, "_path"))
 
     def restore(self, bak_ids: list[str]):
         for bak_id in bak_ids:
-            bak_meta = self.get_bak_meta(bak_id)
+            bak_meta = self._get_bak_meta(bak_id)
             if bak_meta is None:
                 logging.error("backup id not found, skipping")
                 continue
             bak_chain = list(
                 filter(
                     lambda x: getattr(x, "_timestamp") <= bak_meta[1],  # type: ignore
-                    self.get_backup_chain(bak_meta[0]),
+                    self._get_backup_chain(bak_meta[0]),
                 )
             )
             for entry in bak_chain:
-                self.extract(entry)
+                self._extract(entry)
 
-    def rm(self, back_ids: list[str]):
-        pass
+    def _find_index_by_id(self, bak_id) -> int | None:
+        for i in range(len(self._entries)):
+            if self._entries[i].id_ == bak_id:
+                return i
+
+    def rm(self, back_ids: list[str], all=False):
+        for bak_id in back_ids:
+            if all:
+                "find bak dir of the bak id, find all MetaEntry instances of the bak dir, remove all those instances from self._entries:"
+                "   use get_bak_meta[0], def a func that replaces self._entries with a self.entries where path of each entry is not bak dir"
+
+                back_meta = self._get_bak_meta(bak_id)
+                if back_meta is not None:
+                    bak_dir = back_meta[0]
+                    for entry in self._entries:
+                        if entry._path == bak_dir:
+                            (self._meta_dir / (str(entry) + ".zip")).unlink()
+                    self._entries = [
+                        entry for entry in self._entries if entry._path != bak_dir
+                    ]
+
+                else:
+                    logging.error(f"backup id {bak_id} not found, skipping")
+            else:
+                entry_index = self._find_index_by_id(bak_id)
+                if entry_index is not None:
+                    try:
+                        rm_entry = self._entries[entry_index]
+                        (self._meta_dir / Path(str(rm_entry) + ".zip")).unlink()
+                    except FileNotFoundError as e:
+                        logging.error("failed to remove backup" + str(e))
+                    del self._entries[entry_index]
+                    logging.info(f"removed {rm_entry}from registry")
+                else:
+                    logging.error(f"backup id {bak_id} not found, skipping")
+
+        self._to_json()
 
 
 if __name__ == "__main__":
     args = parser.parse_args()
     setup_logging(args.verbose)
     output_dir = Path(args.output)
+    metadata = Metadata(output_dir)
     if args.command == "create":
-        metadata = Metadata(output_dir)
-
-        for source_path in args.create_dir_path:
-            bak_dir = Path(source_path)
-            metadata.backup(bak_dir)
+        metadata.backup(args.create_dir_paths)
     elif args.command == "list":
-        metadata = Metadata(output_dir)
         print(metadata.format_backup_list())
     elif args.command == "restore":
-        metadata = Metadata(output_dir)
         metadata.restore(args.restore_bak_ids)
     elif args.command == "rm":
-        metadata = Metadata(output_dir)
-        metadata.rm(args.rm_bak_ids)
+        metadata.rm(args.rm_bak_ids, args.rm_all)
     else:
         logging.error("Must provide a subcommand")
         parser.print_usage()
 
 # TODO:
-# Fix inconsistency in main() where backup is handling one  dir whereas restore handles
-# a list
+#   Complete logging

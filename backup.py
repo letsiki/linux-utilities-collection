@@ -47,6 +47,7 @@ subcommands = parser.add_subparsers(dest="command")
 create_command = subcommands.add_parser("create", help="create backups")
 list_command = subcommands.add_parser("list", help="list backups")
 restore_command = subcommands.add_parser("restore", help="restore backups")
+remove_command = subcommands.add_parser("rm", help="remove backups")
 
 # ----------------------- MAIN COMMAND ------------------------ #
 parser.add_argument(
@@ -70,12 +71,20 @@ create_command.add_argument(
 
 # --------------------- RESTORE SUBCOMMAND --------------------- #
 restore_command.add_argument(
-    "restore_bak_id",
+    "restore_bak_ids",
     nargs="+",
     help="provide one or  more backup id's to be restored",
 )
+
+# --------------------- RESTORE SUBCOMMAND --------------------- #
+restore_command.add_argument(
+    "rm_bak_ids",
+    nargs="+",
+    help="provide one or  more backup id's to be removed",
+)
 # Positional arguments have their dest equal to their name automatically. Explicitly setting dest will raise error
 #
+
 
 class MetaEntry:
     def __init__(self, data: dict):
@@ -83,6 +92,8 @@ class MetaEntry:
         self._path = Path(data["path"])
         self._timestamp: int = data["timestamp"]
         self._file_count: int = data["file_count"]
+        # We need to explicitly repr as the print and logging modules use str by default
+        logging.debug(f"created {repr(self)}")
 
     @property
     def id_(self):
@@ -97,7 +108,11 @@ class MetaEntry:
     def __hash__(self):
         return abs(hash(self._timestamp))
 
+    def __repr__(self):
+        return f"{self.__class__.__qualname__}(\'{self._path}\', {self._timestamp}, {self._file_count})"
+    
     def __str__(self):
+        "String representation of the meta entry. Can be used as a filename"
         return f"{self._path.stem}_{self._timestamp}"
 
     def to_dict(self):
@@ -107,7 +122,8 @@ class MetaEntry:
             "timestamp": self._timestamp,
             "file_count": self._file_count,
         }
-    
+
+
 class Metadata:
     def __init__(self, meta_dir: Path):
         self._meta_dir = meta_dir.absolute()
@@ -125,10 +141,17 @@ class Metadata:
 
     def get_backup_chain(self, bak_dir: Path):
         # sort all backup entries of a given directory chronologically
-        return sorted(
+        bak_chain =  sorted(
             filter(lambda x: getattr(x, "_path") == bak_dir, self._entries),
             key=lambda x: getattr(x, "_timestamp"),
         )
+        if bak_chain:
+            logging.info(f"got back up chain for dir {bak_dir}")
+            # MetaEntries are nested inside the bakchain list therefore 
+            # MetaEntry.__repr__ will be used despite calling the logging module
+            # The logging module only affects the higher level element
+            logging.info(bak_chain)
+        return bak_chain
 
     def get_last_backup_ts(self, bak_dir: Path) -> int:
         if bak_chain := self.get_backup_chain(bak_dir):
@@ -136,9 +159,11 @@ class Metadata:
         return 0
 
     def get_all_file_paths(self, bak_dir: Path) -> list[Path]:
+        """retrieve all non-dir filepaths from scanning a dir recursively"""
         return [file for file in bak_dir.rglob("*") if file.is_file()]
 
     def filter_updated_paths(self, bak_dir: Path):
+        """filters in all file paths that are new or updated"""
         last_ts = self.get_last_backup_ts(bak_dir)
         current_files = self.get_all_file_paths(bak_dir)
         return list(filter(lambda x: x.stat().st_mtime > last_ts, current_files))
@@ -227,13 +252,17 @@ class Metadata:
                 continue
             bak_chain = list(
                 filter(
-                    lambda x: getattr(x, "_timestamp") <= bak_meta[1], # type: ignore
+                    lambda x: getattr(x, "_timestamp") <= bak_meta[1],  # type: ignore
                     self.get_backup_chain(bak_meta[0]),
                 )
             )
             for entry in bak_chain:
                 self.extract(entry)
-            
+
+    def rm(self, back_ids: list[str]):
+        pass
+
+
 if __name__ == "__main__":
     args = parser.parse_args()
     setup_logging(args.verbose)
@@ -249,7 +278,14 @@ if __name__ == "__main__":
         print(metadata.format_backup_list())
     elif args.command == "restore":
         metadata = Metadata(output_dir)
-        metadata.restore(args.restore_bak_id)
+        metadata.restore(args.restore_bak_ids)
+    elif args.command == "rm":
+        metadata = Metadata(output_dir)
+        metadata.rm(args.rm_bak_ids)
     else:
         logging.error("Must provide a subcommand")
         parser.print_usage()
+
+# TODO:
+# Fix inconsistency in main() where backup is handling one  dir whereas restore handles
+# a list
